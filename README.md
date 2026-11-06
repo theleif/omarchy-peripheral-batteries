@@ -9,8 +9,15 @@ USB/cable, and anything you can feed in through a JSON source — in one place.
 ## What it does
 
 A single bar icon shows the lowest peripheral battery (red when low, with a
-bare `10%` and an optional device count). Click it for a popup listing every
-device, worst battery first:
+bare `10%` and an optional device count). The number is drawn as a bar label,
+so it renders at a readable size instead of being scaled with the icon; set
+`percentFontSize` to change it:
+
+```bash
+omarchy bar set theleif.accessories percentFontSize 17
+```
+
+Click the icon for a popup listing every device, worst battery first:
 
 - Battery level with a progress bar, kind icon, and percent
 - Charging bolt, `Charging` / `Discharging` / `Fully charged`, and

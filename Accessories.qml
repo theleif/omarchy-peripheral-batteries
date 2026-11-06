@@ -23,6 +23,7 @@ Panel {
 
   readonly property bool vertical: bar ? bar.vertical : false
   readonly property bool showPercent: setting("showPercent", true) === true
+  readonly property int percentFontSize: Math.max(8, Math.round(Number(setting("percentFontSize", 15))))
   readonly property bool showCount: setting("showCount", false) === true
   readonly property bool hideWhenEmpty: setting("hideWhenEmpty", true) === true
   readonly property bool hideWired: setting("hideWired", false) === true
@@ -46,7 +47,8 @@ Panel {
   property var solaarReadings: []
   property bool solaarAvailable: false
   property double solaarChecked: 0
-  property string barLabel: ""
+  property string barGlyphText: ""
+  property string barValue: ""
   property string barTooltip: ""
   property bool alert: false
   property bool anyCharging: false
@@ -155,7 +157,8 @@ Panel {
     var info = Model.summary(accessories)
     hasDevices = info.count > 0
     anyCharging = info.charging
-    barLabel = Model.barText(accessories, showPercent, vertical, showCount)
+    barGlyphText = Model.barGlyph(accessories)
+    barValue = Model.barValueText(accessories, showPercent, vertical, showCount)
     barTooltip = Model.tooltipText(accessories)
     alert = info.severity === "critical" || info.severity === "low"
     if (cursorIndex > accessories.length - 1)
@@ -408,15 +411,26 @@ Panel {
       kdeconnectProbe.running = true
   }
 
+  // Width of the value label, so the slot can grow with the font size.
+  TextMetrics {
+    id: valueMetrics
+    font.family: root.bar.fontFamily
+    font.pixelSize: root.percentFontSize
+    font.bold: true
+    text: root.barValue
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barLabel
+    // The glyph goes through the icon path; the value is a real label, so it
+    // renders at percentFontSize instead of being scaled down with the glyph.
+    text: root.barGlyphText
+    labelText: root.barValue
+    fontSize: root.percentFontSize
     active: root.alert
-    // Reserve the wide slot only when a number or count is actually drawn;
-    // level-only devices show the glyph alone.
-    slotSize: Style.bar.iconSlot * (root.barLabel.indexOf(" ") !== -1 ? 2.0 : 1)
+    slotSize: Style.bar.iconSlot + (root.barValue !== "" ? valueMetrics.width + Style.space(6) : 0)
     tooltipText: root.barTooltip
     onPressed: function(b) { root.toggle() }
   }

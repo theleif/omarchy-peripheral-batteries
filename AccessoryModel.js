@@ -813,15 +813,24 @@ function barGlyph(accessories) {
   return list[0].batteryGlyph || codepoint(BATTERY_OUTLINE)
 }
 
-function barText(accessories, showPercent, vertical, showCount) {
+// The text next to the bar glyph, kept separate so it is drawn as a real
+// label (with its own font size) instead of being optically scaled with the
+// glyph like the icon is.
+function barValueText(accessories, showPercent, vertical, showCount) {
   var list = onlineEntries(accessories)
-  var text = barGlyph(accessories)
-  if (list.length === 0) return text
+  if (list.length === 0) return ""
   var info = summary(accessories)
+  var parts = []
   // No number when every device only reports a level; the glyph carries it.
-  if (showPercent && !vertical && info.lowest >= 0) text += " " + info.lowest + "%"
-  if (showCount && !vertical && info.count > 1) text += " \u00B7 " + info.count
-  return text
+  if (showPercent && !vertical && info.lowest >= 0) parts.push(info.lowest + "%")
+  if (showCount && !vertical && info.count > 1) parts.push("\u00B7 " + info.count)
+  return parts.join(" ")
+}
+
+function barText(accessories, showPercent, vertical, showCount) {
+  var text = barGlyph(accessories)
+  var value = barValueText(accessories, showPercent, vertical, showCount)
+  return value === "" ? text : text + " " + value
 }
 
 function tooltipText(accessories) {
@@ -896,6 +905,7 @@ if (typeof module !== "undefined" && module.exports) {
     onlineEntries: onlineEntries,
     summary: summary,
     barGlyph: barGlyph,
+    barValueText: barValueText,
     barText: barText,
     tooltipText: tooltipText,
     criticalKeys: criticalKeys,

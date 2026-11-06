@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "theleif.accessories",
   "name": "Peripheral Batteries",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "author": "theleif",
   "description": "Battery levels for connected peripherals over Bluetooth, wireless receivers, USB, and an external JSON source",
   "kinds": [
@@ -19,6 +19,7 @@
     "defaultSection": "right",
     "defaults": {
       "showPercent": true,
+      "percentFontSize": 15,
       "showCount": false,
       "hideWhenEmpty": true,
       "hideWired": false,
@@ -29,6 +30,7 @@
     },
     "schema": [
       { "key": "showPercent", "type": "boolean", "label": "Show percentage", "default": true },
+      { "key": "percentFontSize", "type": "number", "label": "Percentage font size (px)", "default": 15 },
       { "key": "showCount", "type": "boolean", "label": "Show device count", "default": false },
       { "key": "hideWhenEmpty", "type": "boolean", "label": "Hide when nothing connected", "default": true },
       { "key": "hideWired", "type": "boolean", "label": "Hide wired (USB) devices", "default": false },
