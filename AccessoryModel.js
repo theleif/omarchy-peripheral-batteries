@@ -250,7 +250,9 @@ function parsePowerSupply(raw) {
     out[name] = {
       capacity: capacity === "" ? null : Number(capacity),
       level: parts[2].trim(),
-      serial: parts.length > 3 ? parts[3].trim() : ""
+      serial: parts.length > 3 ? parts[3].trim() : "",
+      model: parts.length > 4 ? parts[4].trim() : "",
+      status: parts.length > 5 ? parts[5].trim() : ""
     }
   }
   return out
@@ -651,6 +653,35 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
     if (seen[entry.key]) continue
     seen[entry.key] = true
     entries.push(entry)
+  }
+
+  // UPower drops HID++ peripherals from its device list while they charge:
+  // the kernel only sets POWER_SUPPLY_ONLINE while discharging or full, so a
+  // charging device reports online=0 and UPower stops listing it. Re-add any
+  // receiver device that sysfs still knows about.
+  for (var sysName in powerSupply) {
+    if (!Object.prototype.hasOwnProperty.call(powerSupply, sysName)) continue
+    if (seen[sysName]) continue
+    if (String(sysName).indexOf("hidpp_") !== 0) continue
+    var sysInfo = powerSupply[sysName]
+    if (!sysInfo || (sysInfo.level === "" && sysInfo.capacity === null)) continue
+    var sysStatus = String(sysInfo.status || "").toLowerCase()
+    var fake = {
+      model: sysInfo.model || sysName,
+      nativePath: sysName,
+      type: TYPE.Unknown,
+      isPresent: true,
+      percentage: -1,
+      state: sysStatus === "charging"
+        ? STATE.Charging
+        : (sysStatus === "full" ? STATE.FullyCharged : STATE.Discharging)
+    }
+    var synthesized = baseEntry(fake, shared, "sysfs")
+    if (hideWired && synthesized.transport === "wired") continue
+    if (hiddenByName(synthesized.name, hidden)) continue
+    if (seen[synthesized.key]) continue
+    seen[synthesized.key] = true
+    entries.push(synthesized)
   }
 
   for (var j = 0; j < bluetooth.length; j++) {

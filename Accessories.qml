@@ -226,7 +226,7 @@ Panel {
   // synthesised 10 %/50 % values are recognised.
   Process {
     id: sysfsProc
-    command: ["sh", "-c", "for d in /sys/class/power_supply/*; do [ -d \"$d\" ] || continue; c=$(cat \"$d/capacity\" 2>/dev/null); l=$(cat \"$d/capacity_level\" 2>/dev/null); if [ -n \"$c\" ] || [ -n \"$l\" ]; then printf '%s\\t%s\\t%s\\n' \"$(basename \"$d\")\" \"$c\" \"$l\"; fi; done"]
+    command: ["sh", "-c", "for d in /sys/class/power_supply/*; do [ -d \"$d\" ] || continue; c=$(cat \"$d/capacity\" 2>/dev/null); l=$(cat \"$d/capacity_level\" 2>/dev/null); if [ -n \"$c\" ] || [ -n \"$l\" ]; then printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$(basename \"$d\")\" \"$c\" \"$l\" \"$(cat \"$d/serial_number\" 2>/dev/null)\" \"$(cat \"$d/model_name\" 2>/dev/null)\" \"$(cat \"$d/status\" 2>/dev/null)\"; fi; done"]
     stdout: StdioCollector {
       id: sysfsOutput
       waitForEnd: true

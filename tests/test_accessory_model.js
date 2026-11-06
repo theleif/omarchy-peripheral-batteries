@@ -127,10 +127,9 @@ eq(M.tooltipText([{ name: 'A', percent: 10, charging: true, transportLabel: 'Blu
 // UPower invents 10 % for "Low" and 50 % for "Unknown" when sysfs has no
 // capacity attribute; the widget must show the level word instead.
 const ps = M.parsePowerSupply([
-  'hidpp_battery_0\t\tUnknown',
-  'hidpp_battery_1\t\tLow',
-  'hidpp_battery_9\t\tLow',
-  'gip0.0\t70\tNormal'
+  'hidpp_battery_0\t\tUnknown\t8d-c9-87-65\tMX Keys Wireless Keyboard\tDischarging',
+  'hidpp_battery_1\t\tLow\t27-ad-67-89\tWireless Mouse MX Master 3\tDischarging',
+  'gip0.0\t70\tNormal\t\tXbox Controller\tDischarging'
 ].join('\n'))
 eq(ps.hidpp_battery_1.level, 'Low', 'powerSupply: level parsed')
 eq(ps.hidpp_battery_1.capacity, null, 'powerSupply: empty capacity is null')
@@ -158,7 +157,7 @@ const critical = M.collect([mxMaster], [], display, { powerSupply: M.parsePowerS
 eq(critical[0].severity, 'critical', 'coarse critical still alarms')
 eq(M.criticalKeys(critical, 15), ['hidpp_battery_1'], 'coarse critical still notifies')
 
-const sleepCoarse = M.collect([sleeping], [], display, { powerSupply: ps })
+const sleepCoarse = M.collect([sleeping], [], display, { powerSupply: M.parsePowerSupply('hidpp_battery_9\t\tLow\t\t\tDischarging') })
 eq(sleepCoarse.length, 1, 'level-only device with a negative percentage is still listed')
 eq(sleepCoarse[0].coarse, true, 'sleeping hidpp device is coarse')
 
@@ -219,6 +218,29 @@ eq(withSolaar[0].severity, 'good', 'solaar percentage uses real thresholds')
 eq(M.valueText(withSolaar[0]), '64%', 'solaar value is a percentage')
 eq(M.barText(withSolaar, true, false, false), cp(0xF089E) + ' 64%', 'bar shows the solaar percentage (charging glyph)')
 eq(M.criticalKeys(withSolaar, 15), [], 'healthy solaar reading does not notify')
+
+// ---- charging devices dropped by UPower ----
+// While charging, the kernel reports ONLINE=0 and UPower stops listing the
+// device entirely; the widget must keep showing it from sysfs.
+const psCharging = M.parsePowerSupply('hidpp_battery_1\t\tLow\t27-ad-67-89\tWireless Mouse MX Master 3\tCharging')
+eq(psCharging.hidpp_battery_1.model, 'Wireless Mouse MX Master 3', 'powerSupply: model parsed')
+eq(psCharging.hidpp_battery_1.status, 'Charging', 'powerSupply: status parsed')
+
+const chargingOnly = M.collect([], [], display, { powerSupply: psCharging })
+eq(chargingOnly.length, 1, 'charging device is listed even though UPower dropped it')
+eq(chargingOnly[0].name, 'Wireless Mouse MX Master 3', 'sysfs device keeps its model name')
+eq(chargingOnly[0].charging, true, 'sysfs device is charging')
+eq(chargingOnly[0].coarse, true, 'sysfs device without Solaar is level-only')
+eq(chargingOnly[0].levelLabel, 'Low', 'sysfs device shows its level')
+eq(chargingOnly[0].transport, 'wireless', 'hidpp sysfs device is wireless')
+
+const chargingSolaar = M.collect([], [], display, { powerSupply: psCharging, solaar: solaar })
+eq(chargingSolaar[0].percent, 82, 'solaar percentage applied to a charging sysfs device')
+eq(chargingSolaar[0].charging, true, 'solaar reading keeps charging state')
+eq(M.valueText(chargingSolaar[0]), '82%', 'charging device shows a percentage')
+
+const onePs = M.parsePowerSupply('hidpp_battery_1\t\tLow\t27-ad-67-89\tWireless Mouse MX Master 3\tDischarging')
+eq(M.collect([mxMaster], [], display, { powerSupply: onePs }).length, 1, 'sysfs fallback does not duplicate a UPower device')
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
