@@ -637,6 +637,7 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
     bluetoothDevices: bluetooth,
     transportOverrides: options.transportOverrides || null,
     powerSupply: powerSupply,
+    knownNames: options.knownNames || null,
     solaar: options.solaar || null
   }
   var entries = []
@@ -666,8 +667,16 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
     var sysInfo = powerSupply[sysName]
     if (!sysInfo || (sysInfo.level === "" && sysInfo.capacity === null)) continue
     var sysStatus = String(sysInfo.status || "").toLowerCase()
+    // Prefer the name UPower uses, remembered per serial, so the row does not
+    // change identity when the device starts charging. Fall back to the
+    // kernel's model name the first time a device is seen this way.
+    var remembered = ""
+    if (shared.knownNames) {
+      var serialKey = normalizeSerial(sysInfo.serial)
+      remembered = shared.knownNames[serialKey] || shared.knownNames[sysName] || ""
+    }
     var fake = {
-      model: sysInfo.model || sysName,
+      model: remembered || sysInfo.model || sysName,
       nativePath: sysName,
       type: TYPE.Unknown,
       isPresent: true,

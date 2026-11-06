@@ -64,6 +64,67 @@ Panel {
     property string notified: ""
   }
 
+  // UPower's model names, remembered per serial on disk: UPower stops
+  // reporting a peripheral while it charges, and the kernel's model name
+  // ("Wireless Mouse MX Master 3") is not what the user normally sees.
+  readonly property string namesPath: Quickshell.env("HOME") + "/.cache/omarchy-accessories/device-names.json"
+  property var knownNames: ({})
+  property string namesWritten: ""
+  // False until the names file has been read, so an early rebuild cannot
+  // overwrite remembered names with the empty initial map.
+  property bool namesReady: false
+
+  function parseKnownNames(raw) {
+    if (!raw) return ({})
+    try {
+      var parsed = JSON.parse(String(raw))
+      return parsed && typeof parsed === "object" ? parsed : ({})
+    } catch (error) {
+      return ({})
+    }
+  }
+
+  function saveKnownNames(map) {
+    var json = JSON.stringify(map)
+    if (json === root.namesWritten) return
+    root.namesWritten = json
+    Quickshell.execDetached([
+      "sh", "-c", "mkdir -p \"$(dirname \"$2\")\" && printf '%s' \"$1\" > \"$2\"",
+      "sh", json, root.namesPath
+    ])
+  }
+
+  // Record the UPower name for every peripheral it currently reports, keyed by
+  // serial (falling back to the native path), and persist only on change.
+  function rememberDeviceNames() {
+    var existing = root.knownNames || ({})
+    if (!root.namesReady) return existing
+    var known = ({})
+    for (var key in existing) known[key] = existing[key]
+    var changed = false
+    var devices = UPower.devices ? UPower.devices.values : []
+    for (var i = 0; i < devices.length; i++) {
+      var device = devices[i]
+      if (!device || device.isPresent !== true) continue
+      // No sysfs entry means the snapshot has not run yet; recording a name
+      // under the native path then would create a duplicate key.
+      var info = root.powerSupply[String(device.nativePath || "")]
+      if (!info) continue
+      var serial = info.serial ? Model.normalizeSerial(info.serial) : ""
+      var nameKey = serial !== "" ? serial : String(device.nativePath || "")
+      var name = String(device.model || "").trim()
+      if (nameKey === "" || name === "") continue
+      if (known[nameKey] === name) continue
+      known[nameKey] = name
+      changed = true
+    }
+    if (changed) {
+      root.knownNames = known
+      saveKnownNames(known)
+    }
+    return known
+  }
+
   function refresh() {
     rebuild()
     if (!sysfsProc.running) sysfsProc.running = true
@@ -84,6 +145,7 @@ Panel {
         hiddenDevices: root.hiddenDevices,
         transportOverrides: root.transportOverrides,
         powerSupply: root.powerSupply,
+        knownNames: rememberDeviceNames(),
         solaar: root.solaarReadings,
         external: externalFile.text(),
         additional: [root.kdeconnectJson],
@@ -218,6 +280,35 @@ Panel {
     onFileChanged: root.refresh()
     onLoaded: root.refresh()
     onLoadFailed: root.refresh()
+  }
+
+  // Remembered UPower model names (serial -> name), written by saveKnownNames.
+  FileView {
+    id: namesFile
+    path: root.namesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      root.namesWritten = String(namesFile.text() || "")
+      root.knownNames = root.parseKnownNames(root.namesWritten)
+      root.namesReady = true
+      root.rebuild()
+    }
+    onFileChanged: {
+      var text = String(namesFile.text() || "")
+      // Ignore a transient empty read of a file we know has content.
+      if (text === "" && root.namesWritten !== "") return
+      root.namesWritten = text
+      root.knownNames = root.parseKnownNames(text)
+      root.namesReady = true
+      root.rebuild()
+    }
+    onLoadFailed: {
+      // No file yet: start from empty and let the next rebuild create it.
+      root.knownNames = ({})
+      root.namesReady = true
+      root.rebuild()
+    }
   }
 
   // Snapshot every power_supply: name, numeric capacity (empty when the

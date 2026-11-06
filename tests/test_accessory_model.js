@@ -242,5 +242,19 @@ eq(M.valueText(chargingSolaar[0]), '82%', 'charging device shows a percentage')
 const onePs = M.parsePowerSupply('hidpp_battery_1\t\tLow\t27-ad-67-89\tWireless Mouse MX Master 3\tDischarging')
 eq(M.collect([mxMaster], [], display, { powerSupply: onePs }).length, 1, 'sysfs fallback does not duplicate a UPower device')
 
+// ---- remembered UPower names ----
+const remembered = M.collect([], [], display, {
+  powerSupply: psCharging,
+  knownNames: { '27ad6789': 'Logitech MX Master 3' }
+})
+eq(remembered[0].name, 'Logitech MX Master 3', 'remembered UPower name wins over the kernel model name')
+const rememberedByPath = M.collect([], [], display, {
+  powerSupply: M.parsePowerSupply('hidpp_battery_7\t\tLow\t\tMX Keys Wireless Keyboard\tCharging'),
+  knownNames: { hidpp_battery_7: 'Logitech MX Keys' }
+})
+eq(rememberedByPath[0].name, 'Logitech MX Keys', 'remembered name falls back to the native path key')
+const unknownName = M.collect([], [], display, { powerSupply: psCharging, knownNames: {} })
+eq(unknownName[0].name, 'Wireless Mouse MX Master 3', 'kernel model name used until UPower has been seen')
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

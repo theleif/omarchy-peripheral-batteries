@@ -46,6 +46,23 @@ devices:
   bucket is what made it cry wolf. A device-reported `Critical` still
   notifies.
 
+### While charging
+
+The kernel only sets `POWER_SUPPLY_ONLINE` for a Logitech device while it is
+discharging or full, and UPower drops devices that report `online=0`. A
+peripheral on the charger would therefore vanish from the widget. Receiver
+devices UPower no longer lists are rebuilt from the sysfs snapshot (model,
+level, charging state), with the Solaar percentage applied when available and
+deduplicated by native path so nothing is listed twice.
+
+Because UPower's model name is the one shown normally, the widget remembers it
+per serial number and reuses it for the sysfs fallback — the row keeps the same
+name before, during and after charging instead of switching to the kernel's
+`Wireless Mouse MX Master 3` form. Names are learned whenever UPower reports a
+device and stored in `~/.cache/omarchy-accessories/device-names.json`, so they
+survive restarts. A device that has never been seen through UPower falls back to
+the kernel's model name until it is.
+
 ### Solaar (optional, real percentages)
 
 [Solaar](https://github.com/pwr-Solaar/Solaar) speaks HID++ to the devices
