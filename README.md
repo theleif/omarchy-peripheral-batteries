@@ -25,6 +25,51 @@ device, worst battery first:
 The icon hides itself when nothing is connected, so it never occupies empty
 bar space.
 
+## Devices without a real percentage
+
+Some peripherals never report a percentage at all. Logitech HID++ keyboards
+and mice behind a Unifying receiver, for example, expose only a coarse
+`capacity_level` bucket in sysfs (`Unknown`, `Low`, `Normal`, `High`,
+`Full`) — there is no `capacity` attribute. UPower fills its `Percentage`
+property with a stand-in derived from that bucket (`10 %` for low, `50 %` for
+unknown) and its own `upower -i` output prints `(should be ignored)` next to
+it. The number never moves and says nothing about the charge.
+
+The widget reads `/sys/class/power_supply/*` alongside UPower and, for those
+devices:
+
+- shows the level word (`Low`, `Unknown`, …) instead of a fabricated percent,
+- draws no progress bar, and adds `level only` to the row,
+- keeps them out of the bar's percentage and out of the lowest-battery
+  summary,
+- never raises a low-battery notification from the `Low` bucket, because that
+  bucket is what made it cry wolf. A device-reported `Critical` still
+  notifies.
+
+### Solaar (optional, real percentages)
+
+[Solaar](https://github.com/pwr-Solaar/Solaar) speaks HID++ to the devices
+themselves and can return a percentage even when the kernel only exposes a
+bucket. Install it (`sudo pacman -S solaar`, then `solaar show` to check that
+it can read your devices) and the widget picks it up automatically:
+
+- detected with `command -v solaar`, no configuration needed;
+- `solaar show` runs at startup, when the popup is opened, and every five
+  minutes; it is throttled because it wakes every device;
+- readings are matched to UPower devices by **serial number** first, then by a
+  normalised name, so a Solaar number replaces the `Low`/`Unknown` word and is
+  used for the bar, the summary, the progress bar and notifications;
+- when Solaar only reports a bucket as well, the word stays but is refreshed
+  from the device;
+- with Solaar absent or unreadable (`Device is offline`, permissions), the
+  widget silently falls back to the level word.
+
+Note that whether Solaar can produce a number at all is up to the device: a
+peripheral that only advertises battery *levels* in HID++ reports the same
+bucket to Solaar and to the kernel. `solaar show` tells you which case you are
+in — `Battery: 82%, discharging.` is a real percentage, `Battery: low,
+discharging.` is a bucket.
+
 ## Install
 
 ```bash

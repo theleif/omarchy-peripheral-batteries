@@ -15,6 +15,13 @@
 //   * Non-UPower sources (phones, vendor daemons) can be injected as JSON
 //     with a timestamp and TTL, and are shown as offline past the TTL instead
 //     of reporting a stale number.
+//   * Some devices (notably Logitech HID++ peripherals behind a Unifying
+//     receiver) expose only a coarse capacity_level in sysfs, with no
+//     `capacity` attribute at all. UPower then synthesises a Percentage from
+//     that bucket — 10 % for "Low", 50 % for "Unknown" — and its own tool
+//     prints "(should be ignored)" next to it. Those devices are shown as a
+//     level word instead of a made-up number, and never raise a low-battery
+//     notification on the synthetic value.
 
 var TYPE = {
   Unknown: 0,
@@ -72,6 +79,19 @@ var SYSTEM_TYPES = [
 var DEFAULT_WARNING = 30
 var DEFAULT_CRITICAL = 15
 var DEFAULT_TTL = 900
+
+// A device that only reports a coarse capacity_level gives no percentage.
+// The label is shown instead of a number; severity is deliberately soft for
+// "low" because the bucket is device-reported and often stale, and alarming
+// on it is what made this widget cry wolf.
+var COARSE_LEVELS = {
+  critical: { label: "Critical", severity: "critical", glyphPercent: 10 },
+  low: { label: "Low", severity: "medium", glyphPercent: 25 },
+  normal: { label: "Normal", severity: "good", glyphPercent: 60 },
+  high: { label: "High", severity: "good", glyphPercent: 80 },
+  full: { label: "Full", severity: "good", glyphPercent: 100 },
+  unknown: { label: "Unknown", severity: "unknown", glyphPercent: -1 }
+}
 
 var TRANSPORT_LABELS = {
   bluetooth: "Bluetooth",
@@ -213,6 +233,159 @@ function percentOf(device) {
   return clamp(Math.round(value * 100), 0, 100)
 }
 
+// Parse the sysfs snapshot produced for options.powerSupply:
+//   hidpp_battery_1<TAB>10<TAB>Low
+// with an empty capacity field meaning "sysfs has no capacity attribute".
+function parsePowerSupply(raw) {
+  var out = {}
+  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    if (line.trim() === "") continue
+    var parts = line.split("\t")
+    if (parts.length < 3) continue
+    var name = parts[0].trim()
+    if (name === "") continue
+    var capacity = parts[1].trim()
+    out[name] = {
+      capacity: capacity === "" ? null : Number(capacity),
+      level: parts[2].trim(),
+      serial: parts.length > 3 ? parts[3].trim() : ""
+    }
+  }
+  return out
+}
+
+function powerInfoFor(device, powerSupply) {
+  if (!powerSupply || !device) return null
+  var key = String(device.nativePath || "")
+  if (key === "") return null
+  return powerSupply[key] || null
+}
+
+// True when the kernel exposes a real numeric capacity for this device.
+function hasRealCapacity(device, powerSupply) {
+  var info = powerInfoFor(device, powerSupply)
+  if (!info) return false
+  return info.capacity !== null && isFinite(Number(info.capacity))
+}
+
+// True when UPower's percentage is a stand-in for a coarse level bucket
+// rather than a measurement (HID++ peripherals with no capacity attribute).
+function hasCoarseBattery(device, powerSupply) {
+  var info = powerInfoFor(device, powerSupply)
+  if (!info) return false
+  return !hasRealCapacity(device, powerSupply)
+}
+
+function coarseLevelOf(device, powerSupply) {
+  var info = powerInfoFor(device, powerSupply)
+  if (!info) return "unknown"
+  var level = String(info.level || "").toLowerCase().trim()
+  return COARSE_LEVELS[level] ? level : "unknown"
+}
+
+function coarseInfo(device, powerSupply) {
+  return COARSE_LEVELS[coarseLevelOf(device, powerSupply)]
+}
+
+// Solaar speaks HID++ to the device itself and can report a percentage the
+// kernel does not expose. `solaar show` is parsed here; entries with a real
+// number take over from UPower's synthetic value.
+function normalizeSerial(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .toLowerCase()
+    .replace(/[^0-9a-z]/g, "")
+}
+
+// Drop vendor words and transport nouns so "Wireless Mouse MX Master 3"
+// and "Logitech MX Master 3" compare as "mx master 3".
+function nameCore(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(logitech|wireless|usb|receiver|device|mouse|keyboard|optical|advanced|gaming)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+}
+
+function sameName(a, b) {
+  var ca = nameCore(a)
+  var cb = nameCore(b)
+  if (ca === "" || cb === "") return false
+  return ca === cb || ca.indexOf(cb) !== -1 || cb.indexOf(ca) !== -1
+}
+
+// Parse `solaar show`. Each device block looks like:
+//     1: Wireless Mouse MX Master 3
+//         Serial number: 27AD6789
+//         ...
+//         Battery: 80%, discharging.
+function parseSolaar(raw) {
+  var lines = String(raw === undefined || raw === null ? "" : raw).split("\n")
+  var out = []
+  var current = null
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    if (line.trim() === "") continue
+    // Device headers sit at a shallow indent ("  1: MX Keys Keyboard").
+    // Feature and firmware lines are indented further or carry a "{xxxx}"
+    // feature id, and must not be mistaken for devices.
+    var header = /^ {0,6}(\d+):\s+(\S.*)$/.exec(line)
+    if (header && !/\{[0-9A-Fa-f]{4}\}/.test(header[2])) {
+      current = {
+        name: header[2].trim(),
+        serial: "",
+        percent: -1,
+        level: "",
+        charging: false
+      }
+      out.push(current)
+      continue
+    }
+    if (!current) continue
+    var serial = /^\s*Serial number:\s*(\S+)/.exec(line)
+    if (serial) {
+      current.serial = serial[1].trim()
+      continue
+    }
+    var battery = /^\s*Battery:\s*(.+)$/.exec(line)
+    if (battery && current.percent < 0 && current.level === "") {
+      var text = battery[1].trim()
+      var percent = /(\d+)\s*%/.exec(text)
+      if (percent) {
+        current.percent = clamp(Number(percent[1]), 0, 100)
+      } else {
+        var word = /(critical|low|good|full|empty)/i.exec(text)
+        if (word) current.level = word[1].toLowerCase()
+      }
+      var tail = text.indexOf(",") >= 0 ? text.slice(text.indexOf(",") + 1) : ""
+      current.charging = /recharg|charging/i.test(tail) && !/discharg/i.test(tail)
+    }
+  }
+  var clean = []
+  for (var j = 0; j < out.length; j++) {
+    if (out[j].percent >= 0 || out[j].level !== "") clean.push(out[j])
+  }
+  return clean
+}
+
+// Best Solaar reading for a UPower device: exact serial first, then a
+// normalised name match.
+function solaarFor(device, powerSupply, readings) {
+  if (!readings || typeof readings.length !== "number" || readings.length === 0) return null
+  var info = powerInfoFor(device, powerSupply)
+  var serial = info ? normalizeSerial(info.serial) : ""
+  var name = device ? device.model : ""
+  var byName = null
+  for (var i = 0; i < readings.length; i++) {
+    var reading = readings[i]
+    var readingSerial = normalizeSerial(reading.serial)
+    if (serial !== "" && readingSerial !== "" && readingSerial === serial) return reading
+    if (byName === null && sameName(name, reading.name)) byName = reading
+  }
+  return byName
+}
+
 function isCharging(device) {
   var state = Number(device.state)
   return state === STATE.Charging || state === STATE.PendingCharge
@@ -334,9 +507,30 @@ function alreadyCovered(name, list) {
 function baseEntry(device, options, source) {
   var warning = options.warning
   var critical = options.critical
+  var coarse = hasCoarseBattery(device, options.powerSupply)
+  var level = coarse ? coarseInfo(device, options.powerSupply) : null
   var percent = percentOf(device)
   var charging = isCharging(device)
-  var full = isFullyCharged(device, percent)
+
+  // A Solaar reading beats UPower's synthetic value when it has a number,
+  // and refreshes the bucket when it only has a level.
+  var solaar = coarse ? solaarFor(device, options.powerSupply, options.solaar) : null
+  var solaarPercent = -1
+  if (solaar && solaar.percent !== undefined && solaar.percent !== null) {
+    var asNumber = Number(solaar.percent)
+    if (isFinite(asNumber) && asNumber >= 0) solaarPercent = clamp(Math.round(asNumber), 0, 100)
+  }
+  if (solaar && solaarPercent < 0 && solaar.level && COARSE_LEVELS[String(solaar.level).toLowerCase()]) {
+    level = COARSE_LEVELS[String(solaar.level).toLowerCase()]
+  }
+  if (solaarPercent >= 0) {
+    coarse = false
+    level = null
+    percent = solaarPercent
+    if (solaar.charging === true) charging = true
+  }
+
+  var full = coarse ? coarseLevelOf(device, options.powerSupply) === "full" : isFullyCharged(device, percent)
   var name = String(device.model || device.nativePath || "Unknown device").trim() || "Unknown device"
   var kind = inferKind(device)
   var transport = transportFor(device, options.bluetoothDevices, options.transportOverrides)
@@ -348,19 +542,30 @@ function baseEntry(device, options, source) {
     nativePath: String(device.nativePath || ""),
     bluetoothAddress: btMatch ? String(btMatch.address || "") : "",
     source: source,
-    percent: percent,
+    // A coarse device has no honest percentage; -1 keeps it out of every
+    // threshold comparison while the level word is shown instead.
+    percent: coarse ? -1 : percent,
+    coarse: coarse,
+    levelLabel: coarse ? level.label : "",
     charging: charging,
     full: full,
     stateLabel: stateLabel(device, charging, full),
-    detail: detailFor(device, charging, full),
-    severity: severity(percent, warning, critical),
+    detail: coarse ? "level only" : detailFor(device, charging, full),
+    severity: coarse ? level.severity : severity(percent, warning, critical),
     typeIcon: kindIcon(kind),
-    batteryGlyph: batteryGlyph(percent, charging),
+    batteryGlyph: batteryGlyph(coarse ? level.glyphPercent : percent, charging),
     transport: transport,
     transportLabel: TRANSPORT_LABELS[transport],
     transportIcon: transportIcon(transport),
     online: true
   }
+}
+
+// What to show where a percentage goes: a number only when it is real.
+function valueText(item) {
+  if (!item) return ""
+  if (item.coarse) return item.levelLabel || "Level only"
+  return Number(item.percent) + "%"
 }
 
 // Parse the optional external source: a JSON array of
@@ -423,11 +628,14 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
   var ttl = isFinite(options.ttl) ? Number(options.ttl) : DEFAULT_TTL
   var now = isFinite(options.now) ? Number(options.now) : Date.now() / 1000
   var bluetooth = bluetoothDevices || []
+  var powerSupply = options.powerSupply || null
   var shared = {
     warning: warning,
     critical: critical,
     bluetoothDevices: bluetooth,
-    transportOverrides: options.transportOverrides || null
+    transportOverrides: options.transportOverrides || null,
+    powerSupply: powerSupply,
+    solaar: options.solaar || null
   }
   var entries = []
   var seen = {}
@@ -436,7 +644,7 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
   for (var i = 0; i < devices.length; i++) {
     var device = devices[i]
     if (!isAccessory(device, device === displayDevice)) continue
-    if (percentOf(device) < 0) continue
+    if (percentOf(device) < 0 && !hasCoarseBattery(device, powerSupply)) continue
     var entry = baseEntry(device, shared, "upower")
     if (hideWired && entry.transport === "wired") continue
     if (hiddenByName(entry.name, hidden)) continue
@@ -496,8 +704,14 @@ function collect(upowerDevices, bluetoothDevices, displayDevice, options) {
     }
   }
 
+  // Real percentages first, worst first; level-only devices follow (there is
+  // nothing to rank them by), then offline entries.
   entries.sort(function(a, b) {
     if (a.online !== b.online) return a.online ? -1 : 1
+    var aReal = a.percent >= 0
+    var bReal = b.percent >= 0
+    if (aReal !== bReal) return aReal ? -1 : 1
+    if (!aReal) return 0
     return a.percent - b.percent
   })
   return entries
@@ -510,24 +724,44 @@ function onlineEntries(accessories) {
   return out
 }
 
+// Aggregate view. Only real percentages feed lowest/average; level-only
+// devices still contribute their severity so a device-reported "Critical"
+// is not hidden.
 function summary(accessories) {
   var list = onlineEntries(accessories)
   if (list.length === 0)
-    return { count: 0, lowest: -1, lowestName: "", average: -1, charging: false, severity: "unknown" }
+    return { count: 0, lowest: -1, lowestName: "", average: -1, coarseCount: 0, charging: false, severity: "unknown" }
   var total = 0
+  var counted = 0
+  var coarseCount = 0
+  var lowest = -1
+  var lowestName = ""
   var charging = false
   var worst = "good"
-  var rank = { unknown: 0, critical: 0, low: 1, medium: 2, good: 3 }
+  // "unknown" is the least alarming state: it must never mask a real
+  // critical device with a sleeping one.
+  var rank = { unknown: 4, critical: 0, low: 1, medium: 2, good: 3 }
   for (var i = 0; i < list.length; i++) {
-    total += list[i].percent
-    if (list[i].charging) charging = true
-    if (rank[list[i].severity] < rank[worst]) worst = list[i].severity
+    var item = list[i]
+    if (item.coarse || item.percent < 0) {
+      coarseCount++
+    } else {
+      total += item.percent
+      counted++
+      if (lowest < 0 || item.percent < lowest) {
+        lowest = item.percent
+        lowestName = item.name
+      }
+    }
+    if (item.charging) charging = true
+    if (rank[item.severity] < rank[worst]) worst = item.severity
   }
   return {
     count: list.length,
-    lowest: list[0].percent,
-    lowestName: list[0].name,
-    average: Math.round(total / list.length),
+    lowest: lowest,
+    lowestName: lowestName,
+    average: counted > 0 ? Math.round(total / counted) : -1,
+    coarseCount: coarseCount,
     charging: charging,
     severity: worst
   }
@@ -536,7 +770,7 @@ function summary(accessories) {
 function barGlyph(accessories) {
   var list = onlineEntries(accessories)
   if (list.length === 0) return codepoint(BATTERY_OUTLINE)
-  return batteryGlyph(list[0].percent, list[0].charging)
+  return list[0].batteryGlyph || codepoint(BATTERY_OUTLINE)
 }
 
 function barText(accessories, showPercent, vertical, showCount) {
@@ -544,7 +778,8 @@ function barText(accessories, showPercent, vertical, showCount) {
   var text = barGlyph(accessories)
   if (list.length === 0) return text
   var info = summary(accessories)
-  if (showPercent && !vertical) text += " " + info.lowest + "%"
+  // No number when every device only reports a level; the glyph carries it.
+  if (showPercent && !vertical && info.lowest >= 0) text += " " + info.lowest + "%"
   if (showCount && !vertical && info.count > 1) text += " \u00B7 " + info.count
   return text
 }
@@ -555,19 +790,26 @@ function tooltipText(accessories) {
   var parts = []
   for (var i = 0; i < list.length; i++) {
     var item = list[i]
-    parts.push(item.name + " \u2014 " + item.percent + "%" +
+    parts.push(item.name + " \u2014 " + valueText(item) +
       (item.charging ? codepoint(ICON_CHARGING_BOLT) : "") + " \u00B7 " + item.transportLabel)
   }
   return parts.join("\n")
 }
 
-// Devices whose battery is at or below the critical threshold, for the
-// once-per-crossing low-battery notification.
+// Devices that deserve a once-per-crossing notification. A device that only
+// reports a coarse level is never announced on "Low" — that bucket is what
+// made the widget cry wolf — but a device-reported "Critical" still is.
 function criticalKeys(accessories, critical) {
   var list = onlineEntries(accessories)
   var out = []
   for (var i = 0; i < list.length; i++) {
-    if (list[i].percent <= critical && !list[i].charging) out.push(list[i].key)
+    var item = list[i]
+    if (item.charging) continue
+    if (item.coarse) {
+      if (item.severity === "critical") out.push(item.key)
+      continue
+    }
+    if (item.percent >= 0 && item.percent <= critical) out.push(item.key)
   }
   return out
 }
@@ -587,6 +829,18 @@ if (typeof module !== "undefined" && module.exports) {
     isSystemType: isSystemType,
     isAccessory: isAccessory,
     percentOf: percentOf,
+    parsePowerSupply: parsePowerSupply,
+    parseSolaar: parseSolaar,
+    normalizeSerial: normalizeSerial,
+    nameCore: nameCore,
+    sameName: sameName,
+    solaarFor: solaarFor,
+    powerInfoFor: powerInfoFor,
+    hasRealCapacity: hasRealCapacity,
+    hasCoarseBattery: hasCoarseBattery,
+    coarseLevelOf: coarseLevelOf,
+    coarseInfo: coarseInfo,
+    valueText: valueText,
     isCharging: isCharging,
     isFullyCharged: isFullyCharged,
     severity: severity,

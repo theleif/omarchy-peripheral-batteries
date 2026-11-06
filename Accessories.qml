@@ -37,6 +37,15 @@ Panel {
   readonly property string kdeconnectScript: String(Qt.resolvedUrl("sources/kdeconnect.py")).replace(/^file:\/\//, "")
 
   property var accessories: []
+  // Raw sysfs snapshot keyed by power_supply name, so the model can tell a
+  // real percentage from UPower's stand-in for a coarse capacity_level.
+  property var powerSupply: ({})
+  property bool powerSupplyReady: false
+  // Optional Solaar readings: real HID++ percentages for devices whose kernel
+  // power_supply only exposes a coarse level.
+  property var solaarReadings: []
+  property bool solaarAvailable: false
+  property double solaarChecked: 0
   property string barLabel: ""
   property string barTooltip: ""
   property bool alert: false
@@ -57,6 +66,8 @@ Panel {
 
   function refresh() {
     rebuild()
+    if (!sysfsProc.running) sysfsProc.running = true
+    refreshSolaar(false)
     if (root.kdeconnectSource && root.kdeconnectAvailable && !kdeconnectProc.running)
       kdeconnectProc.running = true
   }
@@ -72,6 +83,8 @@ Panel {
         critical: root.criticalThreshold,
         hiddenDevices: root.hiddenDevices,
         transportOverrides: root.transportOverrides,
+        powerSupply: root.powerSupply,
+        solaar: root.solaarReadings,
         external: externalFile.text(),
         additional: [root.kdeconnectJson],
         now: Date.now() / 1000
@@ -97,6 +110,9 @@ Panel {
   // Announce devices that have just crossed into the critical band.
   function maybeNotify() {
     if (!notifyLow) return
+    // Wait for the sysfs snapshot, otherwise the first build classifies a
+    // level-only device from its synthetic percentage and alerts on it.
+    if (!root.powerSupplyReady) return
     var keys = Model.criticalKeys(accessories, criticalThreshold)
     var already = persisted.notified.split(",")
     for (var i = 0; i < keys.length; i++) {
@@ -114,7 +130,7 @@ Panel {
       "-u", "critical",
       "-i", "battery-caution",
       item.name + " battery low",
-      item.percent + "% \u00B7 " + item.transportLabel
+      Model.valueText(item) + " \u00B7 " + item.transportLabel
     ])
   }
 
@@ -158,7 +174,7 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Component.onCompleted: { refresh(); probeKdeconnect() }
+  Component.onCompleted: { refresh(); probeKdeconnect(); solaarProbe.running = true }
   onBarChanged: refresh()
   onSettingsChanged: refresh()
   onHideWiredChanged: refresh()
@@ -174,6 +190,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       refresh()
+      refreshSolaar(false)
       cursorActive = false
       cursorIndex = 0
     }
@@ -201,6 +218,72 @@ Panel {
     onFileChanged: root.refresh()
     onLoaded: root.refresh()
     onLoadFailed: root.refresh()
+  }
+
+  // Snapshot every power_supply: name, numeric capacity (empty when the
+  // kernel has none) and the coarse capacity_level. HID++ peripherals behind
+  // a Unifying receiver only ever expose the level, which is how UPower's
+  // synthesised 10 %/50 % values are recognised.
+  Process {
+    id: sysfsProc
+    command: ["sh", "-c", "for d in /sys/class/power_supply/*; do [ -d \"$d\" ] || continue; c=$(cat \"$d/capacity\" 2>/dev/null); l=$(cat \"$d/capacity_level\" 2>/dev/null); if [ -n \"$c\" ] || [ -n \"$l\" ]; then printf '%s\\t%s\\t%s\\n' \"$(basename \"$d\")\" \"$c\" \"$l\"; fi; done"]
+    stdout: StdioCollector {
+      id: sysfsOutput
+      waitForEnd: true
+      onStreamFinished: {
+        root.powerSupply = Model.parsePowerSupply(String(sysfsOutput.text || ""))
+        root.powerSupplyReady = true
+        root.rebuild()
+      }
+    }
+  }
+
+  // Solaar is optional: when installed it can read a real HID++ percentage
+  // for devices whose kernel power_supply only reports a level bucket.
+  Process {
+    id: solaarProbe
+    command: ["sh", "-c", "command -v solaar >/dev/null 2>&1"]
+    onExited: function(code) {
+      root.solaarAvailable = code === 0
+      if (root.solaarAvailable) root.refreshSolaar(true)
+    }
+  }
+
+  Process {
+    id: solaarProc
+    command: ["timeout", "25", "solaar", "show"]
+    stdout: StdioCollector {
+      id: solaarOutput
+      waitForEnd: true
+      onStreamFinished: {
+        root.solaarReadings = Model.parseSolaar(String(solaarOutput.text || ""))
+        root.rebuild()
+      }
+    }
+  }
+
+  // `solaar show` takes ~12 s (it queries every feature), and charge moves
+  // slowly, so a quarter-hourly poll is plenty.
+  Timer {
+    interval: 900000
+    running: root.solaarAvailable
+    repeat: true
+    onTriggered: root.refreshSolaar(true)
+  }
+
+  // `solaar show` wakes every device and takes a couple of seconds, so it is
+  // throttled instead of running on the 10 s refresh tick.
+  function refreshSolaar(force) {
+    if (solaarProc.running || solaarProbe.running) return
+    var now = Date.now() / 1000
+    if (!force && now - root.solaarChecked < 300) return
+    root.solaarChecked = now
+    // Re-probe when Solaar is missing, so installing it needs no shell restart.
+    if (!root.solaarAvailable) {
+      solaarProbe.running = true
+      return
+    }
+    solaarProc.running = true
   }
 
   // Cheap probe so we don't spawn the collector on machines without KDE
@@ -240,7 +323,9 @@ Panel {
     bar: root.bar
     text: root.barLabel
     active: root.alert
-    slotSize: Style.bar.iconSlot * (root.showPercent && !root.vertical ? 2.0 : 1)
+    // Reserve the wide slot only when a number or count is actually drawn;
+    // level-only devices show the glyph alone.
+    slotSize: Style.bar.iconSlot * (root.barLabel.indexOf(" ") !== -1 ? 2.0 : 1)
     tooltipText: root.barTooltip
     onPressed: function(b) { root.toggle() }
   }
@@ -314,7 +399,8 @@ Panel {
                 if (root.accessories.length === 0) return "No batteries detected"
                 var info = Model.summary(root.accessories)
                 var parts = [info.count + (info.count === 1 ? " device" : " devices")]
-                parts.push("lowest " + info.lowest + "%")
+                if (info.lowest >= 0) parts.push("lowest " + info.lowest + "%")
+                else if (info.coarseCount > 0) parts.push("level only")
                 if (root.anyCharging) parts.push("charging")
                 return parts.join(" \u00B7 ")
               }
@@ -477,6 +563,8 @@ Panel {
 
           Rectangle {
             id: progress
+            // No progress bar without a real percentage.
+            visible: row.item.percent >= 0
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             width: Math.max(0, parent.width - meta.implicitWidth - Style.space(8))
@@ -537,7 +625,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
-          text: row.item.percent + "%"
+          text: Model.valueText(row.item)
           color: row.itemColor
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.body

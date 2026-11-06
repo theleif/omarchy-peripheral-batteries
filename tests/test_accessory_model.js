@@ -123,5 +123,102 @@ eq(M.tooltipText([]), 'No peripheral batteries', 'empty tooltip')
 eq(M.tooltipText([{ name: 'A', percent: 10, charging: true, transportLabel: 'Bluetooth', online: true }]),
    'A \u2014 10%' + cp(0xF140B) + ' \u00B7 Bluetooth', 'tooltip row with charging bolt')
 
+// ---- coarse level-only devices (Logitech HID++ behind a Unifying receiver) ----
+// UPower invents 10 % for "Low" and 50 % for "Unknown" when sysfs has no
+// capacity attribute; the widget must show the level word instead.
+const ps = M.parsePowerSupply([
+  'hidpp_battery_0\t\tUnknown',
+  'hidpp_battery_1\t\tLow',
+  'hidpp_battery_9\t\tLow',
+  'gip0.0\t70\tNormal'
+].join('\n'))
+eq(ps.hidpp_battery_1.level, 'Low', 'powerSupply: level parsed')
+eq(ps.hidpp_battery_1.capacity, null, 'powerSupply: empty capacity is null')
+eq(ps['gip0.0'].capacity, 70, 'powerSupply: numeric capacity parsed')
+eq(M.hasCoarseBattery(mxMaster, ps), true, 'hidpp without capacity is coarse')
+eq(M.hasCoarseBattery(xbox, ps), false, 'device with a capacity attribute is not coarse')
+eq(M.hasCoarseBattery(mxMaster, null), false, 'no snapshot -> trust UPower')
+
+const coarseList = M.collect([mxMaster, mxKeys, xbox], [], display, { powerSupply: ps })
+eq(coarseList.map(x => x.name), ['Microsoft Xbox Controller', 'Logitech MX Master 3', 'Logitech MX Keys'], 'real percentages sort before level-only devices')
+eq(coarseList[1].percent, -1, 'coarse device has no percentage')
+eq(coarseList[1].levelLabel, 'Low', 'coarse device carries its level label')
+eq(M.valueText(coarseList[1]), 'Low', 'value text is the level word')
+eq(M.valueText(coarseList[0]), '70%', 'real percentage keeps its number')
+eq(coarseList[1].severity, 'medium', 'coarse low does not alarm')
+eq(coarseList[1].batteryGlyph, cp(0xF007C), 'coarse low uses the low glyph')
+eq(M.summary(coarseList).lowest, 70, 'summary ignores level-only devices for lowest')
+eq(M.summary(coarseList).coarseCount, 2, 'summary counts level-only devices')
+eq(M.barText(coarseList, true, false, false), cp(0xF0081) + ' 70%', 'bar shows the real percentage only')
+eq(M.barText(M.collect([mxMaster], [], display, { powerSupply: ps }), true, false, false), cp(0xF007C), 'bar omits the number when only a level exists')
+eq(M.criticalKeys(coarseList, 60), [], 'coarse low never notifies')
+eq(M.tooltipText(coarseList).split('\n')[1], 'Logitech MX Master 3 \u2014 Low \u00B7 Wireless', 'tooltip uses the level word')
+
+const critical = M.collect([mxMaster], [], display, { powerSupply: M.parsePowerSupply('hidpp_battery_1\t\tCritical') })
+eq(critical[0].severity, 'critical', 'coarse critical still alarms')
+eq(M.criticalKeys(critical, 15), ['hidpp_battery_1'], 'coarse critical still notifies')
+
+const sleepCoarse = M.collect([sleeping], [], display, { powerSupply: ps })
+eq(sleepCoarse.length, 1, 'level-only device with a negative percentage is still listed')
+eq(sleepCoarse[0].coarse, true, 'sleeping hidpp device is coarse')
+
+// A sleeping unknown device must not mask a real critical one in the summary.
+const mixed = M.collect([
+  { model: 'GIP Pad', nativePath: 'gip0.0', type: T.GamingInput, isPresent: true, percentage: 0.10, state: M.STATE.Discharging },
+  { model: 'Idle Thing', nativePath: 'hidpp_battery_5', type: T.Mouse, isPresent: true, percentage: 1.0, state: M.STATE.Unknown }
+], [], display, { powerSupply: M.parsePowerSupply('hidpp_battery_5\t\tUnknown') })
+eq(M.summary(mixed).severity, 'critical', 'unknown device does not mask critical')
+
+// ---- Solaar readings override the coarse bucket ----
+const solaarOut = [
+  'Solaar version 1.1.14',
+  '',
+  'USB and Bluetooth Devices',
+  '',
+  '  1: Unifying Receiver',
+  '     Device path  : /dev/hidraw0',
+  '     Serial       : 8DC98765',
+  '',
+  '     1: Wireless Mouse MX Master 3',
+  '        Device path  : /dev/hidraw2',
+  '        Kind         : mouse',
+  '        Serial number: 27AD6789',
+  '        Battery: 82%, discharging.',
+  '',
+  '     2: MX Keys Wireless Keyboard',
+  '        Device path  : /dev/hidraw1',
+  '        Serial number: 8DC98765',
+  '        Battery: 64%, recharging.',
+  ''
+].join('\n')
+const solaar = M.parseSolaar(solaarOut)
+eq(solaar.map(x => x.name), ['Wireless Mouse MX Master 3', 'MX Keys Wireless Keyboard'], 'solaar: devices parsed, receiver skipped')
+eq(solaar[0].percent, 82, 'solaar: percentage parsed')
+eq(solaar[0].serial, '27AD6789', 'solaar: serial parsed')
+eq(solaar[0].charging, false, 'solaar: discharging is not charging')
+eq(solaar[1].charging, true, 'solaar: recharging detected')
+
+eq(M.parseSolaar('  1: Old Mouse\n     Battery: low, discharging.\n')[0].level, 'low', 'solaar: bucket-only reading')
+eq(M.parseSolaar('  1: Receiver\n     Battery status unavailable.\n').length, 0, 'solaar: unavailable battery ignored')
+eq(M.normalizeSerial('27-ad-67-89'), M.normalizeSerial('27AD6789'), 'serials normalise to the same key')
+eq(M.sameName('Logitech MX Master 3', 'Wireless Mouse MX Master 3'), true, 'fuzzy name match')
+eq(M.sameName('Logitech MX Keys', 'MX Keys Wireless Keyboard'), true, 'fuzzy name match with suffix')
+eq(M.sameName('Logitech MX Keys', 'Microsoft Xbox Controller'), false, 'unrelated names do not match')
+
+const psSerial = M.parsePowerSupply('hidpp_battery_1\t\tLow\t27-ad-67-89\nhidpp_battery_0\t\tUnknown\t8d-c9-87-65')
+eq(psSerial.hidpp_battery_1.serial, '27-ad-67-89', 'powerSupply: serial parsed')
+eq(M.solaarFor(mxMaster, psSerial, solaar).percent, 82, 'serial match beats name')
+
+const withSolaar = M.collect([mxMaster, mxKeys], [], display, { powerSupply: psSerial, solaar: solaar })
+eq(withSolaar.map(x => [x.name, x.percent, x.coarse]), [
+  ['Logitech MX Keys', 64, false],
+  ['Logitech MX Master 3', 82, false]
+], 'solaar percentages replace the coarse bucket')
+eq(withSolaar[0].coarse, false, 'solaar reading is not coarse')
+eq(withSolaar[0].severity, 'good', 'solaar percentage uses real thresholds')
+eq(M.valueText(withSolaar[0]), '64%', 'solaar value is a percentage')
+eq(M.barText(withSolaar, true, false, false), cp(0xF089E) + ' 64%', 'bar shows the solaar percentage (charging glyph)')
+eq(M.criticalKeys(withSolaar, 15), [], 'healthy solaar reading does not notify')
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
